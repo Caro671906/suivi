@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suivi ordonnances</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--txt:#1c2330;--mut:#667085;--line:#e3e6ec;--pri:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c}
+@media (prefers-color-scheme:dark){:root{--bg:#11151c;--card:#1a2029;--txt:#e8ecf3;--mut:#9aa4b5;--line:#2a3340;--pri:#5b8def;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:16px}
+h1{font-size:1.4rem;margin:8px 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.grow{flex:1}
+label{display:block;font-size:.85rem;color:var(--mut);margin:8px 0 3px}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--txt);font:inherit}
+button{padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--txt);font:inherit;cursor:pointer}
+button.pri{background:var(--pri);border-color:var(--pri);color:#fff}
+button.danger{color:var(--bad)}
+button:disabled{opacity:.45;cursor:default}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media (max-width:520px){.grid{grid-template-columns:1fr}}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:.8rem;font-weight:600;border:1px solid currentColor}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.name{font-weight:650;font-size:1.05rem}
+.meta{color:var(--mut);font-size:.9rem}
+.big{font-size:1.6rem;font-weight:700}
+details summary{cursor:pointer;color:var(--mut);font-size:.9rem;margin-top:8px}
+ul.hist{margin:6px 0 0;padding-left:18px;color:var(--mut);font-size:.9rem}
+.empty{text-align:center;color:var(--mut);padding:24px}
+.note{font-size:.85rem;color:var(--mut)}
+.banner{background:rgba(37,99,235,.12);border:1px solid var(--pri);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+<h1>Suivi de mes ordonnances</h1>
+
+<div class="card">
+  <div class="row">
+    <button class="pri" id="btnOcr">📷 Lire une photo (gratuit)</button>
+    <input type="file" id="ocrFile" accept="image/*" hidden>
+    <button id="btnScan">Lire avec Claude (clé API)</button>
+    <input type="file" id="scanFile" accept="image/*" hidden>
+    <button id="btnNew">+ Ajouter à la main</button>
+    <span class="grow"></span>
+    <button id="btnKey">Clé API</button>
+    <button id="btnExport">Sauvegarder (export)</button>
+    <button id="btnImport">Restaurer (import)</button>
+    <input type="file" id="file" accept="application/json" hidden>
+  </div>
+  <p id="scanStatus" class="note" hidden></p>
+  <p class="note" style="margin:10px 0 0">Vos données restent dans ce navigateur, sur cet appareil. La lecture gratuite se fait sur votre appareil : la photo n'est envoyée nulle part (seul l'outil de lecture est téléchargé la première fois). Seule exception : « Lire avec Claude » envoie la photo à l'API d'Anthropic. La lecture gratuite est moins fiable, surtout sur l'écriture manuscrite. Vérifiez toujours les champs avant d'enregistrer. Pensez à faire une sauvegarde de temps en temps.</p>
+</div>
+
+<form class="card" id="form" hidden>
+  <div id="fBanner" class="banner" hidden></div>
+  <input type="hidden" id="fId">
+  <div class="grid">
+    <div><label for="fType">Type</label>
+      <select id="fType"><option>Médicament</option><option>Prise de sang</option><option>Autre examen</option></select></div>
+    <div><label for="fName">Nom (médicament ou examen)</label><input id="fName" required placeholder="ex. Levothyrox 75 µg"></div>
+    <div><label for="fDate">Date de l'ordonnance</label><input type="date" id="fDate" required></div>
+    <div><label for="fTotal">Nombre total autorisé</label><input type="number" id="fTotal" min="1" value="1" required></div>
+    <div><label for="fEnd">Date limite de validité (facultatif)</label><input type="date" id="fEnd"></div>
+    <div><label for="fDone">Déjà utilisées (facultatif)</label><input type="number" id="fDone" min="0" value="0"></div>
+  </div>
+  <p class="note">Nombre total = 1 + renouvellements. Exemple : « à renouveler 3 fois » → 4. Pour « 3 mois », comptez le nombre de délivrances indiqué par la durée par boîte (à confirmer avec la pharmacie).</p>
+  <label for="fNote">Notes (facultatif)</label><textarea id="fNote" rows="2" placeholder="ex. 1 boîte par mois, laboratoire X"></textarea>
+  <div class="row" style="margin-top:12px">
+    <button class="pri" type="submit">Enregistrer</button>
+    <button type="button" id="btnCancel">Annuler</button>
+  </div>
+</form>
+
+<div id="list"></div>
+</main>
+
+<script>
+(function(){
+  var KEY = "suivi-ordonnances-v1";
+  var items = [];
+
+  function load(){
+    try { var r = localStorage.getItem(KEY); items = r ? JSON.parse(r) : []; } catch(e){ items = []; }
+    if(!Array.isArray(items)) items = [];
+  }
+  function save(){
+    try { localStorage.setItem(KEY, JSON.stringify(items)); }
+    catch(e){ alert("Impossible d'enregistrer dans ce navigateur. Utilisez « Sauvegarder (export) »."); }
+  }
+  function today(){ var d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+  function fr(iso){ if(!iso) return ""; var p=iso.split("-"); return p[2]+"/"+p[1]+"/"+p[0]; }
+  function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+  function remaining(it){ return Math.max(0, it.total - it.history.length); }
+  function expired(it){ return it.end && it.end < today(); }
+  function daysLeft(it){
+    if(!it.end) return null;
+    return Math.round((new Date(it.end+"T00:00:00") - new Date(today()+"T00:00:00"))/86400000);
+  }
+  function status(it){
+    var r = remaining(it), dl = daysLeft(it);
+    if(expired(it)) return {cls:"bad", txt:"Expirée"};
+    if(r===0) return {cls:"bad", txt:"Terminée"};
+    if(dl!==null && dl<=30) return {cls:"warn", txt:"Bientôt expirée ("+dl+" j)"};
+    if(r===1) return {cls:"warn", txt:"Dernière utilisation"};
+    return {cls:"ok", txt:"Valide"};
+  }
+  function el(tag, props, kids){
+    var e=document.createElement(tag);
+    if(props) for(var k in props){ if(k==="class") e.className=props[k]; else if(k==="text") e.textContent=props[k]; else e[k]=props[k]; }
+    (kids||[]).forEach(function(c){ e.appendChild(c); });
+    return e;
+  }
+
+  function render(){
+    var box = document.getElementById("list");
+    box.textContent = "";
+    if(!items.length){ box.appendChild(el("div",{class:"card empty",text:"Aucune ordonnance pour l'instant. Cliquez sur « Ajouter une ordonnance »."})); return; }
+    var order = {bad:2, warn:0, ok:1};
+    var sorted = items.slice().sort(function(a,b){
+      var sa=status(a), sb=status(b);
+      // actives first (warn, ok), then finished
+      var oa = (sa.cls==="bad")?2:(sa.cls==="warn"?0:1), ob=(sb.cls==="bad")?2:(sb.cls==="warn"?0:1);
+      if(oa!==ob) return oa-ob;
+      return a.name.localeCompare(b.name,"fr");
+    });
+    sorted.forEach(function(it){
+      var st = status(it), r = remaining(it);
+      var card = el("div",{class:"card"});
+      var top = el("div",{class:"row"},[
+        el("div",{class:"grow"},[
+          el("div",{class:"name",text:it.name}),
+          el("div",{class:"meta",text:it.type+" · ordonnance du "+fr(it.date)+(it.end?" · valable jusqu'au "+fr(it.end):"")})
+        ]),
+        el("span",{class:"badge "+st.cls,text:st.txt})
+      ]);
+      var count = el("div",{class:"row",style:"margin:10px 0"},[
+        el("span",{class:"big",text:r+" / "+it.total}),
+        el("span",{class:"meta",text:"restante"+(r>1?"s":"")+" · "+it.history.length+" faite"+(it.history.length>1?"s":"")})
+      ]);
+      var btns = el("div",{class:"row"});
+      var bDo = el("button",{class:"pri",text:it.type==="Médicament"?"Retiré aujourd'hui":"Fait aujourd'hui"});
+      bDo.disabled = (r===0);
+      bDo.onclick = function(){ it.history.push(today()); save(); render(); };
+      var bDoAt = el("button",{text:"Autre date…"});
+      bDoAt.disabled = (r===0);
+      bDoAt.onclick = function(){
+        var v = prompt("Date (AAAA-MM-JJ) :", today());
+        if(v && /^\d{4}-\d{2}-\d{2}$/.test(v)){ it.history.push(v); it.history.sort(); save(); render(); }
+        else if(v){ alert("Format attendu : AAAA-MM-JJ"); }
+      };
+      var bUndo = el("button",{text:"Annuler la dernière"});
+      bUndo.disabled = !it.history.length;
+      bUndo.onclick = function(){ it.history.pop(); save(); render(); };
+      var bEdit = el("button",{text:"Modifier"});
+      bEdit.onclick = function(){ openForm(it); };
+      var bDel = el("button",{class:"danger",text:"Supprimer"});
+      bDel.onclick = function(){ if(confirm("Supprimer « "+it.name+" » ?")){ items = items.filter(function(x){return x.id!==it.id;}); save(); render(); } };
+      [bDo,bDoAt,bUndo,bEdit,bDel].forEach(function(b){ btns.appendChild(b); });
+
+      card.appendChild(top); card.appendChild(count); card.appendChild(btns);
+      if(it.note) card.appendChild(el("div",{class:"meta",style:"margin-top:8px",text:it.note}));
+      if(it.history.length){
+        var ul = el("ul",{class:"hist"});
+        it.history.slice().reverse().forEach(function(d){ ul.appendChild(el("li",{text:fr(d)})); });
+        card.appendChild(el("details",null,[el("summary",{text:"Historique"}), ul]));
+      }
+      box.appendChild(card);
+    });
+  }
+
+  var form = document.getElementById("form");
+  function openForm(it){
+    form.hidden = false;
+    document.getElementById("fBanner").hidden = true;
+    document.getElementById("fId").value = it ? it.id : "";
+    document.getElementById("fType").value = it ? it.type : "Médicament";
+    document.getElementById("fName").value = it ? it.name : "";
+    document.getElementById("fDate").value = it ? it.date : today();
+    document.getElementById("fTotal").value = it ? it.total : 1;
+    document.getElementById("fEnd").value = it ? (it.end||"") : "";
+    document.getElementById("fDone").value = it ? it.history.length : 0;
+    document.getElementById("fDone").disabled = !!it;
+    document.getElementById("fNote").value = it ? (it.note||"") : "";
+    form.scrollIntoView({behavior:"smooth"});
+  }
+  document.getElementById("btnNew").onclick = function(){ openForm(null); };
+  document.getElementById("btnCancel").onclick = function(){ form.hidden = true; pending = []; };
+  form.onsubmit = function(e){
+    e.preventDefault();
+    var id = document.getElementById("fId").value;
+    var data = {
+      type: document.getElementById("fType").value,
+      name: document.getElementById("fName").value.trim(),
+      date: document.getElementById("fDate").value,
+      total: Math.max(1, parseInt(document.getElementById("fTotal").value,10)||1),
+      end: document.getElementById("fEnd").value,
+      note: document.getElementById("fNote").value.trim()
+    };
+    if(id){
+      var it = items.filter(function(x){return x.id===id;})[0];
+      if(it){ Object.keys(data).forEach(function(k){ it[k]=data[k]; }); }
+    } else {
+      var done = Math.max(0, parseInt(document.getElementById("fDone").value,10)||0);
+      data.id = uid();
+      data.history = [];
+      for(var i=0;i<Math.min(done,data.total);i++) data.history.push(data.date);
+      items.push(data);
+    }
+    save(); form.hidden = true; render();
+    if(pending.length){ showNext(); }
+  };
+
+  document.getElementById("btnExport").onclick = function(){
+    var blob = new Blob([JSON.stringify(items,null,2)],{type:"application/json"});
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "ordonnances-"+today()+".json";
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  var file = document.getElementById("file");
+  document.getElementById("btnImport").onclick = function(){ file.click(); };
+  file.onchange = function(){
+    var f = file.files[0]; if(!f) return;
+    var rd = new FileReader();
+    rd.onload = function(){
+      try{
+        var d = JSON.parse(rd.result);
+        if(!Array.isArray(d)) throw new Error("format");
+        if(confirm("Remplacer les données actuelles par cette sauvegarde ("+d.length+" ordonnance(s)) ?")){
+          items = d.filter(function(x){return x && x.id && x.name && Array.isArray(x.history);});
+          save(); render();
+        }
+      }catch(err){ alert("Fichier invalide."); }
+      file.value = "";
+    };
+    rd.readAsText(f);
+  };
+
+  /* ---------- Lecture automatique par photo (API Anthropic) ---------- */
+  var KEYNAME = "suivi-ordonnances-apikey";
+  var pending = [], pendTotal = 0;
+
+  function getKey(){ try { return localStorage.getItem(KEYNAME) || ""; } catch(e){ return ""; } }
+  function askKey(){
+    var v = prompt("Collez votre clé API Anthropic (elle commence par sk-ant-). Elle reste uniquement dans ce navigateur. Laissez vide pour la supprimer.", getKey());
+    if(v === null) return getKey();
+    v = v.trim();
+    try { if(v) localStorage.setItem(KEYNAME, v); else localStorage.removeItem(KEYNAME); } catch(e){}
+    return v;
+  }
+  function setStatus(msg, isErr){
+    var s = document.getElementById("scanStatus");
+    s.hidden = !msg; s.textContent = msg || "";
+    s.className = "note" + (isErr ? " bad" : "");
+  }
+  function shrink(file){
+    return new Promise(function(res, rej){
+      var img = new Image(), url = URL.createObjectURL(file);
+      img.onload = function(){
+        var s = Math.min(1, 1800 / Math.max(img.width, img.height));
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        res(c.toDataURL("image/jpeg", 0.85).split(",")[1]);
+      };
+      img.onerror = function(){ URL.revokeObjectURL(url); rej(new Error("Image illisible. Essayez une photo JPEG ou PNG.")); };
+      img.src = url;
+    });
+  }
+  var CONSIGNE =
+    "Tu lis une ordonnance médicale française (photo). Extrais chaque ligne de prescription : médicament ou examen (prise de sang, biologie, autre). " +
+    "Réponds UNIQUEMENT par un tableau JSON, sans aucun texte autour. Chaque élément a ces champs : " +
+    "\"type\" (\"Médicament\", \"Prise de sang\" ou \"Autre examen\"), " +
+    "\"name\" (nom et dosage, ou nom de l'examen), " +
+    "\"date\" (date de l'ordonnance au format AAAA-MM-JJ, sinon null), " +
+    "\"total\" (nombre total de délivrances ou de réalisations autorisées = 1 + nombre de renouvellements indiqués ; « à renouveler 3 fois » donne 4 ; aucune mention de renouvellement donne 1 ; si une durée en mois est indiquée sans nombre précis, mets null), " +
+    "\"end\" (date limite de validité AAAA-MM-JJ uniquement si elle est écrite, sinon null), " +
+    "\"note\" (texte court : posologie, durée par délivrance, et tout doute de lecture). " +
+    "Si un mot ou un chiffre est illisible ou incertain, mets null pour cette valeur et explique-le dans note. N'invente rien.";
+
+  function scan(file){
+    var key = getKey() || askKey();
+    if(!key){ setStatus("Clé API manquante : la lecture automatique est impossible sans elle.", true); return; }
+    setStatus("Lecture de la photo en cours…");
+    shrink(file).then(function(b64){
+      return fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-5-5",
+          max_tokens: 2000,
+          messages: [{ role: "user", content: [
+            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } },
+            { type: "text", text: CONSIGNE }
+          ]}]
+        })
+      });
+    }).then(function(r){
+      return r.json().then(function(j){
+        if(!r.ok) throw new Error((j && j.error && j.error.message) || ("Erreur " + r.status));
+        return j;
+      });
+    }).then(function(j){
+      var t = (j.content || []).map(function(b){ return b.text || ""; }).join("");
+      var m = t.match(/\[[\s\S]*\]/);
+      if(!m) throw new Error("Réponse inattendue, réessayez avec une photo plus nette.");
+      var arr = JSON.parse(m[0]);
+      if(!Array.isArray(arr) || !arr.length) throw new Error("Aucune ligne de prescription trouvée sur la photo.");
+      pending = arr; pendTotal = arr.length;
+      setStatus(pendTotal + " élément(s) lu(s). Vérifiez chacun avant de l'enregistrer.");
+      showNext();
+    }).catch(function(err){
+      setStatus("Échec de la lecture : " + err.message, true);
+    });
+  }
+
+  function showNext(){
+    var d = pending.shift();
+    if(!d) return;
+    var n = pendTotal - pending.length;
+    var iso = /^\d{4}-\d{2}-\d{2}$/;
+    openForm(null);
+    var types = ["Médicament", "Prise de sang", "Autre examen"];
+    document.getElementById("fType").value = types.indexOf(d.type) >= 0 ? d.type : "Médicament";
+    document.getElementById("fName").value = d.name || "";
+    document.getElementById("fDate").value = iso.test(d.date || "") ? d.date : today();
+    document.getElementById("fTotal").value = (d.total && d.total > 0) ? d.total : 1;
+    document.getElementById("fEnd").value = iso.test(d.end || "") ? d.end : "";
+    document.getElementById("fNote").value = d.note || "";
+    var b = document.getElementById("fBanner");
+    var warn = [];
+    if(!d.total) warn.push("nombre total non déterminé (mis à 1, à corriger)");
+    if(!iso.test(d.date || "")) warn.push("date de l'ordonnance non lue (mise à aujourd'hui)");
+    var lbl = d.ocr ? "Lecture locale, peu fiable" : "Lu automatiquement";
+    b.textContent = lbl + " (" + n + "/" + pendTotal + "). Comparez avec votre ordonnance avant d'enregistrer." + (warn.length ? " À vérifier : " + warn.join(" ; ") + "." : "");
+    b.hidden = false;
+  }
+
+  /* ---------- Lecture gratuite et locale (OCR Tesseract.js) ---------- */
+  var tessPromise = null;
+  function loadTess(){
+    if(window.Tesseract) return Promise.resolve(window.Tesseract);
+    if(tessPromise) return tessPromise;
+    tessPromise = new Promise(function(res, rej){
+      var s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+      s.onload = function(){ res(window.Tesseract); };
+      s.onerror = function(){ tessPromise = null; rej(new Error("Impossible de charger l'outil de lecture (une connexion internet est nécessaire la première fois).")); };
+      document.head.appendChild(s);
+    });
+    return tessPromise;
+  }
+  function prep(file){
+    return new Promise(function(res, rej){
+      var img = new Image(), url = URL.createObjectURL(file);
+      img.onload = function(){
+        var longSide = Math.max(img.width, img.height);
+        var s = longSide > 2400 ? 2400 / longSide : (longSide < 1500 ? 1500 / longSide : 1);
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        var ctx = c.getContext("2d");
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        try {
+          var im = ctx.getImageData(0, 0, c.width, c.height), p = im.data;
+          for(var i = 0; i < p.length; i += 4){
+            var g = 0.299 * p[i] + 0.587 * p[i+1] + 0.114 * p[i+2];
+            g = (g - 128) * 1.4 + 128;
+            g = g < 0 ? 0 : (g > 255 ? 255 : g);
+            p[i] = p[i+1] = p[i+2] = g;
+          }
+          ctx.putImageData(im, 0, 0);
+        } catch(e){}
+        res(c.toDataURL("image/png"));
+      };
+      img.onerror = function(){ URL.revokeObjectURL(url); rej(new Error("Image illisible. Essayez une photo JPEG ou PNG.")); };
+      img.src = url;
+    });
+  }
+  function pad(n){ return String(n).padStart(2, "0"); }
+  var MOIS = {"janvier":1,"février":2,"fevrier":2,"mars":3,"avril":4,"mai":5,"juin":6,"juillet":7,"août":8,"aout":8,"septembre":9,"octobre":10,"novembre":11,"décembre":12,"decembre":12};
+  function findDate(t){
+    var found = [], m, re1 = /\b(\d{1,2})\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{4})\b/g;
+    while((m = re1.exec(t))){
+      if(+m[2] >= 1 && +m[2] <= 12 && +m[1] >= 1 && +m[1] <= 31) found.push(m[3] + "-" + pad(+m[2]) + "-" + pad(+m[1]));
+    }
+    var re2 = /\b(\d{1,2})\s+(janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre)\s+(\d{4})\b/gi;
+    while((m = re2.exec(t))){
+      var mo = MOIS[m[2].toLowerCase()];
+      if(mo && +m[1] >= 1 && +m[1] <= 31) found.push(m[3] + "-" + pad(mo) + "-" + pad(+m[1]));
+    }
+    var td = today();
+    found = found.filter(function(d){ return d <= td; }).sort();
+    return found.length ? found[found.length - 1] : null; /* la plus récente : évite la date de naissance */
+  }
+  function findTotal(t){
+    var s = t.toLowerCase(), m;
+    if(/sans\s+renouvellement|non\s+renouvelable/.test(s)) return 1;
+    m = s.match(/renouvel\w*[^0-9\n]{0,15}(\d+)\s*(?:fois|x)/) || s.match(/(\d+)\s*renouvellements?/);
+    if(m) return (+m[1]) + 1;
+    if(/renouvel/.test(s) || /\d+\s*mois/.test(s)) return null; /* mention présente mais pas de nombre clair */
+    return 1;
+  }
+  var LAB = /(?:\bnfs\b|numération|hémogramme|hemogramme|glyc[ée]mie|hba1c|h[ée]moglobine|\btsh\b|\bt4\b|cr[ée]atinin|cholest[ée]rol|triglyc[ée]rid|\bcrp\b|ferritine|ionogramme|\bbilan\b|prise de sang|analyse|s[ée]rologie|\binr\b|\bldl\b|\bhdl\b|transaminases|\basat\b|\balat\b|vitamine\s*d|calc[ée]mie|\bur[ée]e\b|\becbu\b|\bpsa\b)/i;
+  var DOSE = /\d+(?:[.,]\d+)?\s*(?:mg|µg|μg|mcg|g|ml|ui|%)(?![a-z])|comprim|gélule|gelule|sachet|ampoule|gouttes?|\bcp\b|\bgél\b|inj/i;
+  var SKIP = /docteur|\bdr\b|rpps|adresse|\btél|cabinet|ordonnance|patient|né\(?e?\)?\s*le|sécurité|assuré|renouvel|durée|pharmac|signature|\bfait\b/i;
+  function parseLines(text){
+    var out = [], lines = text.split(/\r?\n/);
+    for(var i = 0; i < lines.length && out.length < 15; i++){
+      var l = lines[i].replace(/\s+/g, " ").trim();
+      if(l.length < 4 || SKIP.test(l)) continue;
+      var isLab = LAB.test(l), prev = out.length ? out[out.length - 1] : null;
+      var hasDose = /\d+(?:[.,]\d+)?\s*(?:mg|µg|μg|mcg|g|ml|ui|%)(?![a-z])/i.test(l);
+      /* ligne de posologie ("1 comprimé le matin") : on la rattache à l'élément précédent */
+      var poso = !isLab && !hasDose && (/^\d+\s*(?:comprim|gélule|gelule|sachet|ampoule|goutte|cp\b|gél)/i.test(l) || /\b(?:matin|midi|soir|coucher|par jour|fois par|repas)\b/i.test(l));
+      /* ligne de fréquence d'examen ("prise de sang tous les 3 mois") : idem */
+      var freq = isLab && /^(?:prise de sang|bilan|analyses?)\b/i.test(l) && /tous les|mois|fois|renouvel/i.test(l);
+      if(poso || freq){ if(prev) prev.note = "Lecture locale : " + l + " (à vérifier)."; continue; }
+      var type = null;
+      if(isLab) type = "Prise de sang";
+      else if(DOSE.test(l)) type = "Médicament";
+      if(!type) continue;
+      l = l.replace(/^\s*(?:[-•*·]|\d{1,2}[.)])\s*/, "").slice(0, 80);
+      out.push({ type: type, name: l, end: null, note: "Lecture locale : vérifier le nom, le dosage et la posologie." });
+    }
+    if(!out.length){
+      out.push({ type: "Médicament", name: "", end: null,
+        note: "Aucune ligne reconnue automatiquement. Texte lu : " + text.replace(/\s+/g, " ").trim().slice(0, 500) });
+    }
+    return out;
+  }
+  function ocrScan(file){
+    var dataUrl;
+    setStatus("Préparation de l'image…");
+    prep(file).then(function(u){
+      dataUrl = u;
+      setStatus("Chargement de l'outil de lecture (la première fois, c'est un peu long)…");
+      return loadTess();
+    }).then(function(T){
+      return T.recognize(dataUrl, "fra", { logger: function(m){
+        if(m && m.status){
+          var p = (typeof m.progress === "number") ? " " + Math.round(m.progress * 100) + " %" : "";
+          setStatus("Lecture locale : " + m.status + p);
+        }
+      }});
+    }).then(function(r){
+      var text = (r && r.data && r.data.text) || "";
+      if(text.replace(/\s/g, "").length < 10) throw new Error("Presque rien n'a pu être lu. Essayez une photo plus nette, bien éclairée et bien cadrée.");
+      var date = findDate(text), total = findTotal(text);
+      var arr = parseLines(text).map(function(x){ x.date = date; x.total = total; x.ocr = true; return x; });
+      pending = arr; pendTotal = arr.length;
+      setStatus(pendTotal + " élément(s) proposé(s). Vérifiez chacun avant de l'enregistrer.");
+      showNext();
+    }).catch(function(err){
+      setStatus("Échec de la lecture : " + err.message, true);
+    });
+  }
+  var ocrFile = document.getElementById("ocrFile");
+  document.getElementById("btnOcr").onclick = function(){ ocrFile.click(); };
+  ocrFile.onchange = function(){ var f = ocrFile.files[0]; if(f) ocrScan(f); ocrFile.value = ""; };
+
+  var scanFile = document.getElementById("scanFile");
+  document.getElementById("btnScan").onclick = function(){ scanFile.click(); };
+  scanFile.onchange = function(){ var f = scanFile.files[0]; if(f) scan(f); scanFile.value = ""; };
+  document.getElementById("btnKey").onclick = function(){ askKey(); };
+
+  load(); render();
+})();
+</script>
+</body>
+</html>
